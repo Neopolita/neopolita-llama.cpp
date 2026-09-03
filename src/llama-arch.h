@@ -310,6 +310,7 @@ enum llm_kv {
     LLM_KV_PLE_HEAD_VOCAB_SIZES,
     LLM_KV_PLE_EOS_TOKEN_ID,
     LLM_KV_PLE_IMAGE_TOKEN_ID,
+    LLM_KV_PLE_ROW_PACK, // niwaki
 
     LLM_KV_HASH_LAYER_COUNT,
 
@@ -606,6 +607,7 @@ enum llm_tensor {
     LLM_TENSOR_PLE_NORM_QUERY, // qwen4exp
     LLM_TENSOR_PLE_NORM_CONV,  // qwen4exp
     LLM_TENSOR_PLE_CONV1D,     // qwen4exp
+    LLM_TENSOR_FFN_OUT_MAP,    // niwaki: optional per-layer map on the MoE block output
     LLM_TENSOR_ATTN_COMPRESSOR_WKV,
     LLM_TENSOR_ATTN_COMPRESSOR_WGATE,
     LLM_TENSOR_ATTN_COMPRESSOR_APE,

@@ -243,6 +243,9 @@ class Keys:
         HEAD_VOCAB_SIZES   = "{arch}.ple.head_vocab_sizes"
         EOS_TOKEN_ID       = "{arch}.ple.eos_token_id"
         IMAGE_TOKEN_ID     = "{arch}.ple.image_token_id"
+        # niwaki: the table is stored with ROW_PACK consecutive rows packed into one
+        # (row length head_dim * ROW_PACK), so block-256 quantization types apply
+        ROW_PACK           = "{arch}.ple.row_pack"
 
     class Rope:
         DIMENSION_COUNT           = "{arch}.rope.dimension_count"
@@ -817,6 +820,7 @@ class MODEL_TENSOR(IntEnum):
     PLE_NORM_QUERY       = auto() # qwen4exp
     PLE_NORM_CONV        = auto() # qwen4exp
     PLE_CONV1D           = auto() # qwen4exp
+    FFN_OUT_MAP          = auto() # niwaki: optional per-layer linear map on the MoE block output
     ATTN_COMPRESSOR_WKV  = auto()
     ATTN_COMPRESSOR_WGATE = auto()
     ATTN_COMPRESSOR_APE  = auto()
@@ -1568,6 +1572,7 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.PLE_NORM_QUERY:            "blk.{bid}.ple_norm_query",       # qwen4exp
     MODEL_TENSOR.PLE_NORM_CONV:             "blk.{bid}.ple_norm_conv",        # qwen4exp
     MODEL_TENSOR.PLE_CONV1D:                "blk.{bid}.ple_conv1d",           # qwen4exp
+    MODEL_TENSOR.FFN_OUT_MAP:               "blk.{bid}.ffn_out_map",          # niwaki
     MODEL_TENSOR.ATTN_COMPRESSOR_WKV:       "blk.{bid}.attn_compressor_kv",
     MODEL_TENSOR.ATTN_COMPRESSOR_WGATE:     "blk.{bid}.attn_compressor_gate",
     MODEL_TENSOR.ATTN_COMPRESSOR_APE:       "blk.{bid}.attn_compressor_ape",
@@ -2925,6 +2930,7 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.PLE_NORM_QUERY,
         MODEL_TENSOR.PLE_NORM_CONV,
         MODEL_TENSOR.PLE_CONV1D,
+        MODEL_TENSOR.FFN_OUT_MAP,
     ],
     MODEL_ARCH.PLAMO: [
         MODEL_TENSOR.TOKEN_EMBD,

@@ -1089,6 +1089,9 @@ class GGUFWriter:
     def add_ple_image_token_id(self, value: int) -> None:
         self.add_uint32(Keys.PerLayerEmbedding.IMAGE_TOKEN_ID.format(arch=self.arch), value)
 
+    def add_ple_row_pack(self, value: int) -> None:
+        self.add_uint32(Keys.PerLayerEmbedding.ROW_PACK.format(arch=self.arch), value)
+
     def add_attention_scale(self, value: float) -> None:
         self.add_float32(Keys.Attention.SCALE.format(arch=self.arch), value)
 

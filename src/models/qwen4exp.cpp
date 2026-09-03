@@ -88,6 +88,10 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
         ml.get_key(LLM_KV_PLE_EOS_TOKEN_ID,    hparams.ple_eos_token_id);
         // optional: files written before this key fall back to the EOS token
         ml.get_key(LLM_KV_PLE_IMAGE_TOKEN_ID,  hparams.ple_image_token_id, false);
+        ml.get_key(LLM_KV_PLE_ROW_PACK,        hparams.ple_row_pack,       false);   // niwaki packed table rows
+        if (hparams.ple_row_pack == 0) {
+            hparams.ple_row_pack = 1;
+        }
         ml.get_key(LLM_KV_EMBEDDING_LENGTH_PER_LAYER, hparams.n_embd_per_layer);
         qwen4exp_require_nonzero(ml, LLM_KV_PLE_CONV_KERNEL,             hparams.ple_conv_kernel);
         qwen4exp_require_nonzero(ml, LLM_KV_EMBEDDING_LENGTH_PER_LAYER,  hparams.n_embd_per_layer);
@@ -174,18 +178,25 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
             ple_rows = std::max(ple_rows, (int64_t) hparams.ple_head_offsets[h] + hparams.ple_head_vocab_sizes[h]);
         }
 
+        // niwaki: the file may pack `pack` consecutive rows into one stored row of pack*head_dim
+        const int64_t pack = hparams.ple_row_pack;
+
         // the converter pads the table; a model synthesised from metadata has no tensor to ask
         const std::string ple_name = tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight").str();
         if (const auto * ple_w = ml.get_weight(ple_name.c_str())) {
-            if (ple_w->tensor->ne[1] < ple_rows) {
+            const int64_t have_rows = ple_w->tensor->ne[1] * pack;
+            if (have_rows < ple_rows) {
                 throw std::runtime_error(format("%s has %" PRId64 " rows, too few for the PLE head ranges (%" PRId64 ")",
-                                                ple_name.c_str(), ple_w->tensor->ne[1], ple_rows));
+                                                ple_name.c_str(), have_rows, ple_rows));
             }
-            ple_rows = ple_w->tensor->ne[1];
+            ple_rows = have_rows;
+        }
+        if (ple_rows % pack != 0) {
+            throw std::runtime_error(format("PLE row count %" PRId64 " is not a multiple of ple.row_pack %" PRId64, ple_rows, pack));
         }
 
         per_layer_tok_embd = create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),
-                                           { hparams.ple_head_dim, ple_rows }, TENSOR_READ_LAZY);
+                                           { hparams.ple_head_dim * pack, ple_rows / pack }, TENSOR_READ_LAZY);
     }
 
     for (int il = 0; il < n_layer; ++il) {
@@ -246,14 +257,23 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
             layer.ple_conv1d     = create_tensor(tn(LLM_TENSOR_PLE_CONV1D,     "weight", il), { hparams.ple_conv_kernel, hc_dim }, 0);
         }
 
-        layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, 0);
-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert }, 0);
-        create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, 0);
+        // niwaki: a layer may ship without its routed bank (router + experts absent);
+        // the always-on shared expert then carries the layer alone
+        // (a file may still carry the router of such a layer; the experts decide)
+        layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, TENSOR_NOT_REQUIRED);
+        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert }, TENSOR_NOT_REQUIRED);
+        if (layer.ffn_down_exps != nullptr) {
+            GGML_ASSERT(layer.ffn_gate_inp != nullptr && "routed experts without a router");
+            create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, 0);
+        }
 
         layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", il), { n_embd }, 0);
         layer.ffn_gate_shexp     = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP,     "weight", il), { n_embd, n_ff_shexp }, 0);
         layer.ffn_up_shexp       = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,       "weight", il), { n_embd, n_ff_shexp }, 0);
         layer.ffn_down_shexp     = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP,     "weight", il), { n_ff_shexp, n_embd }, 0);
+
+        // niwaki: optional trained linear map on the MoE block output (distilled healing maps)
+        layer.ffn_out_map = create_tensor(tn(LLM_TENSOR_FFN_OUT_MAP, "weight", il), { n_embd, n_embd }, TENSOR_NOT_REQUIRED);
     }
 }
 
@@ -971,24 +991,27 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
 }
 
 ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, const int il) {
-    GGML_ASSERT(model.layers[il].ffn_gate_inp != nullptr);
-
-    ggml_tensor * moe_out =
-        build_moe_ffn(cur,
-            model.layers[il].ffn_gate_inp,
-            model.layers[il].ffn_up_exps,
-            model.layers[il].ffn_gate_exps,
-            model.layers[il].ffn_down_exps,
-            nullptr,
-            n_expert, n_expert_used,
-            LLM_FFN_SILU, true,
-            hparams.expert_weights_scale,
-            LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX, il,
-            nullptr, model.layers[il].ffn_gate_up_exps,
-            model.layers[il].ffn_up_exps_s,
-            model.layers[il].ffn_gate_exps_s,
-            model.layers[il].ffn_down_exps_s);
-    cb(moe_out, "ffn_moe_out", il);
+    // niwaki: a layer without its routed bank contributes only its shared expert
+    ggml_tensor * moe_out = nullptr;
+    if (model.layers[il].ffn_gate_inp != nullptr && model.layers[il].ffn_down_exps != nullptr) {
+        moe_out =
+            build_moe_ffn(cur,
+                model.layers[il].ffn_gate_inp,
+                model.layers[il].ffn_up_exps,
+                model.layers[il].ffn_gate_exps,
+                model.layers[il].ffn_down_exps,
+                nullptr,
+                n_expert, n_expert_used,
+                LLM_FFN_SILU, true,
+                hparams.expert_weights_scale,
+                LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX, il,
+                nullptr, model.layers[il].ffn_gate_up_exps,
+                model.layers[il].ffn_up_exps_s,
+                model.layers[il].ffn_gate_exps_s,
+                model.layers[il].ffn_down_exps_s);
+        cb(moe_out, "ffn_moe_out", il);
+    }
+    GGML_ASSERT((moe_out != nullptr || model.layers[il].ffn_up_shexp != nullptr) && "a layer needs routed or shared experts");
 
     // shared experts, as in the Qwen3Next reference
     if (model.layers[il].ffn_up_shexp != nullptr) {
@@ -1011,10 +1034,16 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, co
         ffn_shexp = ggml_mul(ctx0, ffn_shexp, shared_gate);
         cb(ffn_shexp, "ffn_shexp_gated", il);
 
-        cur = ggml_add(ctx0, moe_out, ffn_shexp);
+        cur = moe_out != nullptr ? ggml_add(ctx0, moe_out, ffn_shexp) : ffn_shexp;
         cb(cur, "ffn_out", il);
     } else {
         cur = moe_out;
+    }
+
+    // niwaki: distilled output map, y' = W y
+    if (model.layers[il].ffn_out_map != nullptr) {
+        cur = build_lora_mm(model.layers[il].ffn_out_map, cur);
+        cb(cur, "ffn_out_mapped", il);
     }
 
     return cur;
@@ -1037,7 +1066,8 @@ public:
         return rows->ne[0] == (int64_t) pmodel.hparams.ple_n_heads * params.ubatch.n_tokens;
     }
 
-    ggml_tensor * rows = nullptr;   // I32 [ple_n_heads * n_tokens]
+    ggml_tensor * rows = nullptr;   // I32 [ple_n_heads * n_tokens]; packed-row index when ple_row_pack > 1
+    ggml_tensor * slots = nullptr;  // I32 [ple_n_heads * n_tokens]; niwaki: i*pack + (row % pack), only when packed
 
     const llama_model_qwen4exp & pmodel;
 
@@ -1106,6 +1136,18 @@ void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
                     (int32_t) (mixed % hp.ple_head_vocab_sizes[h_i] + hp.ple_head_offsets[h_i]);
             }
         }
+    }
+
+    // niwaki: packed table -> gather the packed row, then the sub-row slot
+    const int64_t pack = hp.ple_row_pack;
+    if (pack > 1) {
+        GGML_ASSERT(slots != nullptr);
+        std::vector<int32_t> slot(idx.size());
+        for (size_t k = 0; k < idx.size(); ++k) {
+            slot[k] = (int32_t) (k * pack + idx[k] % pack);
+            idx[k]  = idx[k] / pack;
+        }
+        ggml_backend_tensor_set(slots, slot.data(), 0, slot.size()*ggml_element_size(slots));
     }
 
     ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
@@ -1178,10 +1220,23 @@ ggml_tensor * llama_model_qwen4exp::graph::build_inp_ple(
     ple_inp->rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
     ggml_set_input(ple_inp->rows);
     ggml_tensor * rows = ple_inp->rows;
+
+    const int64_t pack = hparams.ple_row_pack;
+    ggml_tensor * slots = nullptr;
+    if (pack > 1) {
+        ple_inp->slots = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
+        ggml_set_input(ple_inp->slots);
+        slots = ple_inp->slots;
+    }
     res->add_input(std::move(ple_inp));
 
     // gather then flatten the heads: get_rows lays the head dimension out slowest, as the reference does
     ggml_tensor * emb = ggml_get_rows(ctx0, model.per_layer_tok_embd, rows);
+    if (pack > 1) {
+        // niwaki: each gathered packed row holds `pack` table rows; pick the wanted one
+        emb = ggml_reshape_2d(ctx0, emb, hparams.ple_head_dim, pack * n_heads * n_tokens);
+        emb = ggml_get_rows(ctx0, emb, slots);
+    }
     emb = ggml_reshape_2d(ctx0, emb, hparams.ple_head_dim * n_heads, n_tokens);
     cb(emb, "ple_embd", -1);
 

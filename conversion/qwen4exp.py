@@ -84,6 +84,10 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
             self.gguf_writer.add_ple_image_token_id(int(_img))
         if self._ple_row_dim is not None:
             self.gguf_writer.add_embedding_length_per_layer_input(self._ple_row_dim)
+        # niwaki: consecutive rows packed into one so block-256 quantization applies to the table
+        pack = int(hp.get("ple_row_pack", 1))
+        if pack > 1:
+            self.gguf_writer.add_ple_row_pack(pack)
 
         self.gguf_writer.add_ple_layer_multipliers(
             self._read_hash_constants("ple_embedding.layer_multipliers"))
@@ -163,9 +167,14 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
                     f"PLE shard {shard} has row dim {int(shape[-1])}, expected {self._ple_row_dim}")
             rows += int(shape[0])
 
+        # niwaki: the packed view [rows/pack, row_dim*pack] has the same bytes as [rows, row_dim]
+        # (row-major), so the shards stream unchanged; only the declared shape differs
+        pack = int(self.hparams.get("ple_row_pack", 1))
+        if rows % pack != 0:
+            raise ValueError(f"PLE row count {rows} is not divisible by ple_row_pack {pack}")
         table = gguf.LazyChunkedTensor(
             [self._load_ple_shard(shard) for shard in shards],
-            shape=(rows, self._ple_row_dim),
+            shape=(rows // pack, self._ple_row_dim * pack),
             dtype=np.float32,
         )
         gguf_name = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD]

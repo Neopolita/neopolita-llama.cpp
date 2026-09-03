@@ -2777,6 +2777,9 @@ class TensorNameMap:
             MODEL_TENSOR.PLE_VALUE: (
                 "model.layers.{bid}.ple.value_proj",
             ),
+            MODEL_TENSOR.FFN_OUT_MAP: (
+                "model.layers.{bid}.mlp.output_map",  # niwaki
+            ),
             MODEL_TENSOR.PLE_NORM_KEY: (
                 "model.layers.{bid}.ple.norm_key",
             ),

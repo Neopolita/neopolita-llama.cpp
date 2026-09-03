@@ -346,6 +346,9 @@ struct llama_layer {
     struct ggml_tensor * ffn_latent_down = nullptr;
     struct ggml_tensor * ffn_latent_up   = nullptr;
 
+    // niwaki: optional linear map applied to the MoE block output (qwen4exp)
+    struct ggml_tensor * ffn_out_map = nullptr;
+
     // ff shared expert (shexp)
     struct ggml_tensor * ffn_gate_inp_shexp = nullptr;
     struct ggml_tensor * ffn_gate_shexp     = nullptr;
