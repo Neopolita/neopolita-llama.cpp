@@ -1,5 +1,8 @@
 #include "models.h"
+#include "llama-impl.h"
 #include "llama-memory-recurrent.h"
+
+#include <cinttypes>
 
 void llama_model_qwen35moe::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all, false);
@@ -92,9 +95,23 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
         }
 
         // Routed experts
-        layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, flags);
-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert }, flags);
-        create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, flags);
+        // niwaki: a layer may store fewer routed experts than expert_count (a pruned layer
+        // keeps a subset and routes only over it). The file's down tensor decides the count;
+        // the router carries one row per kept expert, so the softmax over its logits is
+        // exactly the renormalised routing of the MLX artifact.
+        int64_t n_expert_l = n_expert;
+        const std::string down_name = tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il).str();
+        if (const auto * down_w = ml.get_weight(down_name.c_str())) {
+            n_expert_l = down_w->tensor->ne[2];
+            if (n_expert_l < n_expert_used || n_expert_l > n_expert) {
+                throw std::runtime_error(format("%s stores %" PRId64 " experts, expected %" PRId64 "..%" PRId64,
+                                                down_name.c_str(), n_expert_l, n_expert_used, n_expert));
+            }
+        }
+        layer.n_expert_l = n_expert_l;
+        layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert_l }, flags);
+        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert_l }, flags);
+        create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert_l, flags);
 
         // Shared experts
         layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", il), { n_embd }, flags);
@@ -494,6 +511,9 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_ffn(ggml_tensor * cur, c
     // Check if this is an MoE layer
     GGML_ASSERT(model.layers[il].ffn_gate_inp != nullptr);
 
+    // niwaki: route over the experts this layer actually stores (see load_block_trunk)
+    const int64_t n_expert_l = model.layers[il].n_expert_l > 0 ? model.layers[il].n_expert_l : n_expert;
+
     ggml_tensor * moe_out =
         build_moe_ffn(cur,
             model.layers[il].ffn_gate_inp,
@@ -501,7 +521,7 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_ffn(ggml_tensor * cur, c
             model.layers[il].ffn_gate_exps,
             model.layers[il].ffn_down_exps,
             nullptr,
-            n_expert, n_expert_used,
+            n_expert_l, n_expert_used,
             LLM_FFN_SILU, true,
             hparams.expert_weights_scale,
             LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX, il,

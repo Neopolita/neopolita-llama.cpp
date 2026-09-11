@@ -349,6 +349,10 @@ struct llama_layer {
     // niwaki: optional linear map applied to the MoE block output (qwen4exp)
     struct ggml_tensor * ffn_out_map = nullptr;
 
+    // niwaki: routed experts stored in this layer when fewer than expert_count (qwen35moe,
+    // pruned layers keep a subset; the router has one row per kept expert). 0 = expert_count.
+    int64_t n_expert_l = 0;
+
     // ff shared expert (shexp)
     struct ggml_tensor * ffn_gate_inp_shexp = nullptr;
     struct ggml_tensor * ffn_gate_shexp     = nullptr;
