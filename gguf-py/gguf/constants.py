@@ -821,6 +821,7 @@ class MODEL_TENSOR(IntEnum):
     PLE_NORM_CONV        = auto() # qwen4exp
     PLE_CONV1D           = auto() # qwen4exp
     FFN_OUT_MAP          = auto() # niwaki: optional per-layer linear map on the MoE block output
+    FFN_EXP_IDS          = auto() # niwaki: ids of the routed experts a layer stores (compact bank, full router)
     ATTN_COMPRESSOR_WKV  = auto()
     ATTN_COMPRESSOR_WGATE = auto()
     ATTN_COMPRESSOR_APE  = auto()
@@ -1573,6 +1574,7 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.PLE_NORM_CONV:             "blk.{bid}.ple_norm_conv",        # qwen4exp
     MODEL_TENSOR.PLE_CONV1D:                "blk.{bid}.ple_conv1d",           # qwen4exp
     MODEL_TENSOR.FFN_OUT_MAP:               "blk.{bid}.ffn_out_map",          # niwaki
+    MODEL_TENSOR.FFN_EXP_IDS:               "blk.{bid}.ffn_exp_ids",          # niwaki
     MODEL_TENSOR.ATTN_COMPRESSOR_WKV:       "blk.{bid}.attn_compressor_kv",
     MODEL_TENSOR.ATTN_COMPRESSOR_WGATE:     "blk.{bid}.attn_compressor_gate",
     MODEL_TENSOR.ATTN_COMPRESSOR_APE:       "blk.{bid}.attn_compressor_ape",
@@ -2931,6 +2933,7 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.PLE_NORM_CONV,
         MODEL_TENSOR.PLE_CONV1D,
         MODEL_TENSOR.FFN_OUT_MAP,
+        MODEL_TENSOR.FFN_EXP_IDS,
     ],
     MODEL_ARCH.PLAMO: [
         MODEL_TENSOR.TOKEN_EMBD,

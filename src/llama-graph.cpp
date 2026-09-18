@@ -1999,6 +1999,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             {
                 probs = ggml_sqrt(ctx0, ggml_softplus(ctx0, logits)); // [n_expert, n_tokens]
             } break;
+        case LLAMA_EXPERT_GATING_FUNC_TYPE_NONE:
+            {
+                // niwaki: the caller passes final expert weights as probs_in (no gating function)
+                GGML_ASSERT(probs_in != nullptr && "gating NONE needs the weights as probs_in");
+                probs = logits; // [n_expert, n_tokens]
+            } break;
         default:
             GGML_ABORT("fatal error");
     }

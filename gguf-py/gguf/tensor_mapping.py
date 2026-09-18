@@ -2780,6 +2780,9 @@ class TensorNameMap:
             MODEL_TENSOR.FFN_OUT_MAP: (
                 "model.layers.{bid}.mlp.output_map",  # niwaki
             ),
+            MODEL_TENSOR.FFN_EXP_IDS: (
+                "model.layers.{bid}.mlp.expert_ids",  # niwaki
+            ),
             MODEL_TENSOR.PLE_NORM_KEY: (
                 "model.layers.{bid}.ple.norm_key",
             ),

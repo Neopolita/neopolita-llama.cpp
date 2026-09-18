@@ -353,6 +353,10 @@ struct llama_layer {
     // pruned layers keep a subset; the router has one row per kept expert). 0 = expert_count.
     int64_t n_expert_l = 0;
 
+    // niwaki: ids of the stored experts when a layer keeps a compact bank under the FULL router
+    // (qwen4exp: the intact top-k is taken over every expert and the missing ones contribute nothing)
+    struct ggml_tensor * ffn_exp_ids = nullptr;
+
     // ff shared expert (shexp)
     struct ggml_tensor * ffn_gate_inp_shexp = nullptr;
     struct ggml_tensor * ffn_gate_shexp     = nullptr;

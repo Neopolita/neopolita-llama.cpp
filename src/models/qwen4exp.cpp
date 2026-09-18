@@ -260,11 +260,27 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
         // niwaki: a layer may ship without its routed bank (router + experts absent);
         // the always-on shared expert then carries the layer alone
         // (a file may still carry the router of such a layer; the experts decide)
+        // niwaki: a layer may also keep a COMPACT bank (a few of its experts) under the full router: the
+        // file's down tensor decides the count, `ffn_exp_ids` names the stored experts, and the graph
+        // takes the intact top-k over every expert and lets the missing ones contribute nothing
+        int64_t n_expert_l = n_expert;
+        const std::string down_name = tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il).str();
+        if (const auto * down_w = ml.get_weight(down_name.c_str())) {
+            n_expert_l = down_w->tensor->ne[2];
+            if (n_expert_l < 1 || n_expert_l > n_expert) {
+                throw std::runtime_error(format("%s stores %" PRId64 " experts, expected 1..%" PRId64,
+                                                down_name.c_str(), n_expert_l, (int64_t) n_expert));
+            }
+        }
+        layer.n_expert_l    = n_expert_l;
         layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, TENSOR_NOT_REQUIRED);
-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert }, TENSOR_NOT_REQUIRED);
+        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert_l }, TENSOR_NOT_REQUIRED);
         if (layer.ffn_down_exps != nullptr) {
             GGML_ASSERT(layer.ffn_gate_inp != nullptr && "routed experts without a router");
-            create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, 0);
+            create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert_l, 0);
+            if (n_expert_l < n_expert) {
+                layer.ffn_exp_ids = create_tensor(tn(LLM_TENSOR_FFN_EXP_IDS, "weight", il), { n_expert_l }, 0);
+            }
         }
 
         layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", il), { n_embd }, 0);
@@ -993,7 +1009,56 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
 ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, const int il) {
     // niwaki: a layer without its routed bank contributes only its shared expert
     ggml_tensor * moe_out = nullptr;
-    if (model.layers[il].ffn_gate_inp != nullptr && model.layers[il].ffn_down_exps != nullptr) {
+    if (model.layers[il].ffn_gate_inp != nullptr && model.layers[il].ffn_down_exps != nullptr &&
+            model.layers[il].ffn_exp_ids != nullptr) {
+        // niwaki: compact bank under the full router. The routing is the intact block's — softmax over
+        // every expert, top-k, weights renormalised over the top-k — and only the stored experts run:
+        // scatter the top-k weights onto the expert axis (zeros elsewhere), gather the stored experts'
+        // entries, and hand them to build_moe_ffn as final weights (gating NONE, no renormalisation).
+        const int64_t n_tokens = cur->ne[1];
+        const int64_t n_kept   = model.layers[il].n_expert_l;
+        const int64_t n_used_l = std::min<int64_t>(n_expert_used, n_kept);
+
+        ggml_tensor * logits = build_lora_mm(model.layers[il].ffn_gate_inp, cur);        // [n_expert, n_tokens]
+        cb(logits, "ffn_moe_logits", il);
+        ggml_tensor * probs = ggml_soft_max(ctx0, logits);
+        cb(probs, "ffn_moe_probs", il);
+        ggml_tensor * sel = ggml_argsort_top_k(ctx0, probs, n_expert_used);              // [n_expert_used, n_tokens]
+        cb(sel, "ffn_moe_topk", il);
+
+        ggml_tensor * probs3 = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
+        ggml_tensor * w      = ggml_get_rows(ctx0, probs3, sel);                         // [1, n_expert_used, n_tokens]
+        ggml_tensor * w_sum  = ggml_sum_rows(ctx0, ggml_reshape_2d(ctx0, w, n_expert_used, n_tokens)); // [1, n_tokens]
+        w_sum = ggml_clamp(ctx0, w_sum, 6.103515625e-5, INFINITY);
+
+        ggml_tensor * full = ggml_set_rows(ctx0, ggml_fill(ctx0, probs3, 0.0f), w, sel); // [1, n_expert, n_tokens]
+        full = ggml_div(ctx0, ggml_reshape_2d(ctx0, full, n_expert, n_tokens), w_sum);   // [n_expert, n_tokens]
+        cb(full, "ffn_moe_weights_full", il);
+
+        // an expert becomes a row, so one id vector gathers the stored experts for every token
+        ggml_tensor * ids    = ggml_cast(ctx0, model.layers[il].ffn_exp_ids, GGML_TYPE_I32);  // [n_kept]
+        ggml_tensor * full_t = ggml_cont(ctx0, ggml_transpose(ctx0, full));              // [n_tokens, n_expert]
+        ggml_tensor * kept_t = ggml_get_rows(ctx0, full_t, ids);                         // [n_tokens, n_kept]
+        ggml_tensor * kept_w = ggml_cont(ctx0, ggml_transpose(ctx0, kept_t));            // [n_kept, n_tokens]
+        cb(kept_w, "ffn_moe_weights_kept", il);
+
+        moe_out =
+            build_moe_ffn(cur,
+                nullptr,
+                model.layers[il].ffn_up_exps,
+                model.layers[il].ffn_gate_exps,
+                model.layers[il].ffn_down_exps,
+                nullptr,
+                n_kept, n_used_l,
+                LLM_FFN_SILU, false,
+                hparams.expert_weights_scale,
+                LLAMA_EXPERT_GATING_FUNC_TYPE_NONE, il,
+                kept_w, model.layers[il].ffn_gate_up_exps,
+                model.layers[il].ffn_up_exps_s,
+                model.layers[il].ffn_gate_exps_s,
+                model.layers[il].ffn_down_exps_s);
+        cb(moe_out, "ffn_moe_out", il);
+    } else if (model.layers[il].ffn_gate_inp != nullptr && model.layers[il].ffn_down_exps != nullptr) {
         moe_out =
             build_moe_ffn(cur,
                 model.layers[il].ffn_gate_inp,
