@@ -263,9 +263,13 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
         // niwaki: a layer may also keep a COMPACT bank (a few of its experts) under the full router: the
         // file's down tensor decides the count, `ffn_exp_ids` names the stored experts, and the graph
         // takes the intact top-k over every expert and lets the missing ones contribute nothing
+        // the bank's expert WIDTH is the file's too: a pruned model may narrow most layers' experts and keep
+        // a few layers' (compact) banks at the original width, so expert_feed_forward_length is only the default
         int64_t n_expert_l = n_expert;
+        int64_t n_ff_exp_l = n_ff_exp;
         const std::string down_name = tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il).str();
         if (const auto * down_w = ml.get_weight(down_name.c_str())) {
+            n_ff_exp_l = down_w->tensor->ne[0];
             n_expert_l = down_w->tensor->ne[2];
             if (n_expert_l < 1 || n_expert_l > n_expert) {
                 throw std::runtime_error(format("%s stores %" PRId64 " experts, expected 1..%" PRId64,
@@ -274,10 +278,10 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
         }
         layer.n_expert_l    = n_expert_l;
         layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, TENSOR_NOT_REQUIRED);
-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert_l }, TENSOR_NOT_REQUIRED);
+        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp_l, n_embd, n_expert_l }, TENSOR_NOT_REQUIRED);
         if (layer.ffn_down_exps != nullptr) {
             GGML_ASSERT(layer.ffn_gate_inp != nullptr && "routed experts without a router");
-            create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert_l, 0);
+            create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp_l, n_expert_l, 0);
             if (n_expert_l < n_expert) {
                 layer.ffn_exp_ids = create_tensor(tn(LLM_TENSOR_FFN_EXP_IDS, "weight", il), { n_expert_l }, 0);
             }
