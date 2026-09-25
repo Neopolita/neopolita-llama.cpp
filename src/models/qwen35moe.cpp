@@ -574,7 +574,7 @@ ggml_tensor * llama_model_qwen35moe::graph::build_tiered_moe(ggml_tensor * cur, 
     ggml_tensor * x        = ggml_repeat_4d(ctx0, ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens), n_embd, n_expert_used, n_tokens, 1);
     x = ggml_reshape_3d(ctx0, x, n_embd, 1, n_rows);                                                // [n_embd, 1, n_rows]
 
-    ggml_tensor * moe_out = nullptr;
+    ggml_tensor * experts_all = nullptr;  // [n_embd, n_expert_used, n_tokens], summed over the tiers
     for (int t = 0; t < layer.n_exp_tier; ++t) {
         ggml_tensor * ids  = ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, layer.ffn_exp_tier_ids[t],  1, n_expert), sel_flat);
         ggml_tensor * mask = ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, layer.ffn_exp_tier_mask[t], 1, n_expert), sel_flat);
@@ -589,23 +589,25 @@ ggml_tensor * llama_model_qwen35moe::graph::build_tiered_moe(ggml_tensor * cur, 
         ggml_tensor * experts = build_lora_mm_id(layer.ffn_down_exps_tier[t], act, ids);            // [n_embd, 1, n_rows]
         experts = ggml_reshape_3d(ctx0, experts, n_embd, n_expert_used, n_tokens);
         experts = ggml_mul(ctx0, experts, ggml_reshape_3d(ctx0, w_t, 1, n_expert_used, n_tokens));
-        cb(experts, "ffn_moe_weighted", il);
-        ggml_build_forward_expand(gf, experts);
-
-        // as build_moe_ffn: views ordered before the adds, bounded by the layer's own top-k (warmup
-        // selects every expert)
-        const uint32_t n_used_il = hparams.n_expert_used(il);
-        ggml_tensor * views[LLAMA_MAX_EXPERTS] = { nullptr };
-        for (uint32_t i = 0; i < n_used_il; ++i) {
-            views[i] = ggml_view_2d(ctx0, experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1]);
-            ggml_build_forward_expand(gf, views[i]);
-        }
-        for (uint32_t i = 0; i < n_used_il; ++i) {
-            moe_out = moe_out ? ggml_add(ctx0, moe_out, views[i]) : views[i];
-            ggml_build_forward_expand(gf, moe_out);
-        }
+        experts_all = experts_all ? ggml_add(ctx0, experts_all, experts) : experts;
     }
-    if (layer.n_exp_tier == 1 && hparams.n_expert_used(il) == 1) {
+    cb(experts_all, "ffn_moe_weighted", il);
+    ggml_build_forward_expand(gf, experts_all);
+
+    // as build_moe_ffn: views ordered before the adds, bounded by the layer's own top-k (warmup selects
+    // every expert)
+    const uint32_t n_used_il = hparams.n_expert_used(il);
+    ggml_tensor * views[LLAMA_MAX_EXPERTS] = { nullptr };
+    for (uint32_t i = 0; i < n_used_il; ++i) {
+        views[i] = ggml_view_2d(ctx0, experts_all, n_embd, n_tokens, experts_all->nb[2], i*experts_all->nb[1]);
+        ggml_build_forward_expand(gf, views[i]);
+    }
+    ggml_tensor * moe_out = views[0];
+    for (uint32_t i = 1; i < n_used_il; ++i) {
+        moe_out = ggml_add(ctx0, moe_out, views[i]);
+        ggml_build_forward_expand(gf, moe_out);
+    }
+    if (n_used_il == 1) {
         moe_out = ggml_cont(ctx0, moe_out);  // avoid returning a non-contiguous tensor
     }
     return moe_out;
