@@ -822,6 +822,11 @@ class MODEL_TENSOR(IntEnum):
     PLE_CONV1D           = auto() # qwen4exp
     FFN_OUT_MAP          = auto() # niwaki: optional per-layer linear map on the MoE block output
     FFN_EXP_IDS          = auto() # niwaki: ids of the routed experts a layer stores (compact bank, full router)
+    FFN_GATE_EXPS_TIER   = auto() # niwaki: routed experts of one precision tier (full router); {xid} = tier key
+    FFN_UP_EXPS_TIER     = auto() # niwaki
+    FFN_DOWN_EXPS_TIER   = auto() # niwaki
+    FFN_EXP_TIER_IDS     = auto() # niwaki: per expert, its index within the tier (0 when not stored there)
+    FFN_EXP_TIER_MASK    = auto() # niwaki: per expert, 1 when the tier stores it, else 0
     ATTN_COMPRESSOR_WKV  = auto()
     ATTN_COMPRESSOR_WGATE = auto()
     ATTN_COMPRESSOR_APE  = auto()
@@ -1575,6 +1580,11 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.PLE_CONV1D:                "blk.{bid}.ple_conv1d",           # qwen4exp
     MODEL_TENSOR.FFN_OUT_MAP:               "blk.{bid}.ffn_out_map",          # niwaki
     MODEL_TENSOR.FFN_EXP_IDS:               "blk.{bid}.ffn_exp_ids",          # niwaki
+    MODEL_TENSOR.FFN_GATE_EXPS_TIER:        "blk.{bid}.ffn_gate_exps.{xid}",  # niwaki
+    MODEL_TENSOR.FFN_UP_EXPS_TIER:          "blk.{bid}.ffn_up_exps.{xid}",    # niwaki
+    MODEL_TENSOR.FFN_DOWN_EXPS_TIER:        "blk.{bid}.ffn_down_exps.{xid}",  # niwaki
+    MODEL_TENSOR.FFN_EXP_TIER_IDS:          "blk.{bid}.ffn_exp_tier_ids.{xid}",  # niwaki
+    MODEL_TENSOR.FFN_EXP_TIER_MASK:         "blk.{bid}.ffn_exp_tier_mask.{xid}", # niwaki
     MODEL_TENSOR.ATTN_COMPRESSOR_WKV:       "blk.{bid}.attn_compressor_kv",
     MODEL_TENSOR.ATTN_COMPRESSOR_WGATE:     "blk.{bid}.attn_compressor_gate",
     MODEL_TENSOR.ATTN_COMPRESSOR_APE:       "blk.{bid}.attn_compressor_ape",
@@ -2866,6 +2876,11 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_UP_EXP,
         MODEL_TENSOR.FFN_GATE_EXP,
         MODEL_TENSOR.FFN_GATE_UP_EXP,
+        MODEL_TENSOR.FFN_GATE_EXPS_TIER,
+        MODEL_TENSOR.FFN_UP_EXPS_TIER,
+        MODEL_TENSOR.FFN_DOWN_EXPS_TIER,
+        MODEL_TENSOR.FFN_EXP_TIER_IDS,
+        MODEL_TENSOR.FFN_EXP_TIER_MASK,
         MODEL_TENSOR.SSM_A,
         MODEL_TENSOR.SSM_CONV1D,
         MODEL_TENSOR.SSM_DT,

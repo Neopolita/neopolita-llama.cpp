@@ -609,6 +609,11 @@ enum llm_tensor {
     LLM_TENSOR_PLE_CONV1D,     // qwen4exp
     LLM_TENSOR_FFN_OUT_MAP,    // niwaki: optional per-layer map on the MoE block output
     LLM_TENSOR_FFN_EXP_IDS,    // niwaki: ids of the routed experts a layer stores (compact bank, full router)
+    LLM_TENSOR_FFN_GATE_EXPS_TIER, // niwaki: routed experts of one precision tier (full router)
+    LLM_TENSOR_FFN_UP_EXPS_TIER,
+    LLM_TENSOR_FFN_DOWN_EXPS_TIER,
+    LLM_TENSOR_FFN_EXP_TIER_IDS,   // niwaki: per expert, its index within the tier (0 when not stored there)
+    LLM_TENSOR_FFN_EXP_TIER_MASK,  // niwaki: per expert, 1 when the tier stores it, else 0
     LLM_TENSOR_ATTN_COMPRESSOR_WKV,
     LLM_TENSOR_ATTN_COMPRESSOR_WGATE,
     LLM_TENSOR_ATTN_COMPRESSOR_APE,

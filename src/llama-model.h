@@ -357,6 +357,18 @@ struct llama_layer {
     // (qwen4exp: the intact top-k is taken over every expert and the missing ones contribute nothing)
     struct ggml_tensor * ffn_exp_ids = nullptr;
 
+    // niwaki: routed experts stored at several precisions under the FULL router (qwen35moe). Tier t keeps
+    // its experts in its own tensors (one quantization type each); per expert, ffn_exp_tier_ids[t] gives
+    // its index within the tier and ffn_exp_tier_mask[t] is 1 when the tier stores it. An expert that no
+    // tier stores contributes nothing. n_exp_tier = 0: the layer uses the plain ffn_*_exps tensors.
+    static constexpr int LLAMA_MAX_EXP_TIERS = 8;
+    int n_exp_tier = 0;
+    struct ggml_tensor * ffn_gate_exps_tier[LLAMA_MAX_EXP_TIERS] = {};
+    struct ggml_tensor * ffn_up_exps_tier  [LLAMA_MAX_EXP_TIERS] = {};
+    struct ggml_tensor * ffn_down_exps_tier[LLAMA_MAX_EXP_TIERS] = {};
+    struct ggml_tensor * ffn_exp_tier_ids  [LLAMA_MAX_EXP_TIERS] = {};
+    struct ggml_tensor * ffn_exp_tier_mask [LLAMA_MAX_EXP_TIERS] = {};
+
     // ff shared expert (shexp)
     struct ggml_tensor * ffn_gate_inp_shexp = nullptr;
     struct ggml_tensor * ffn_gate_shexp     = nullptr;

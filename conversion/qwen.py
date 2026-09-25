@@ -638,6 +638,34 @@ class Qwen3_5TextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
 class Qwen3_5MoeTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
 
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # niwaki: routed experts stored in precision tiers under the full router. HF names
+        # mlp.expert_tiers.{key}.gate_up_proj [n, 2*n_ff, n_embd] / .down_proj [n, n_embd, n_ff] (packed
+        # as mlp.experts.*) and mlp.expert_tier_ids.{key} / mlp.expert_tier_mask.{key} [n_expert]; the
+        # tier key (e.g. the source bit width) carries over into the GGUF names as {xid}.
+        if ".mlp.expert_tier" in name:
+            assert bid is not None
+            T = gguf.MODEL_TENSOR
+            fmt = lambda t, key: gguf.TENSOR_NAMES[t].format(bid=bid, xid=key) + ".weight"  # noqa: E731
+            if ".mlp.expert_tiers." in name:
+                key, proj = name.split(".mlp.expert_tiers.", 1)[1].split(".", 1)
+                if proj == "gate_up_proj":
+                    n_ff = data_torch.shape[-2] // 2
+                    yield fmt(T.FFN_GATE_EXPS_TIER, int(key)), data_torch[..., :n_ff, :].contiguous()
+                    yield fmt(T.FFN_UP_EXPS_TIER, int(key)), data_torch[..., n_ff:, :].contiguous()
+                    return
+                if proj == "down_proj":
+                    yield fmt(T.FFN_DOWN_EXPS_TIER, int(key)), data_torch
+                    return
+            elif ".mlp.expert_tier_ids." in name:
+                yield fmt(T.FFN_EXP_TIER_IDS, int(name.rsplit(".", 1)[1])), data_torch.float()
+                return
+            elif ".mlp.expert_tier_mask." in name:
+                yield fmt(T.FFN_EXP_TIER_MASK, int(name.rsplit(".", 1)[1])), data_torch.float()
+                return
+            raise ValueError(f"Unexpected expert tier tensor {name}")
+        yield from super().modify_tensors(data_torch, name, bid)
+
 
 @ModelBase.register("DFlashDraftModel", "DFlash2DraftModel")
 @ModelBase.example("z-lab/Qwen3.5-9B-DFlash")
