@@ -142,6 +142,28 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         if name.endswith(".ple.conv1d.weight"):
             return [(self.map_tensor_name(name), data_torch.squeeze())]
 
+        # niwaki: routed experts stored in precision tiers under the full router (as Qwen3_5MoeTextModel):
+        # HF mlp.expert_tiers.{key}.gate_up_proj [n, 2*n_ff, n_embd] / .down_proj [n, n_embd, n_ff] (packed as
+        # mlp.experts.*) and mlp.expert_tier_ids.{key} / mlp.expert_tier_mask.{key} [n_expert]; the tier key
+        # carries over into the GGUF names as {xid}
+        if ".mlp.expert_tier" in name:
+            assert bid is not None
+            T = gguf.MODEL_TENSOR
+            fmt = lambda t, key: gguf.TENSOR_NAMES[t].format(bid=bid, xid=key) + ".weight"  # noqa: E731
+            if ".mlp.expert_tiers." in name:
+                key, proj = name.split(".mlp.expert_tiers.", 1)[1].split(".", 1)
+                if proj == "gate_up_proj":
+                    n_ff = data_torch.shape[-2] // 2
+                    return [(fmt(T.FFN_GATE_EXPS_TIER, int(key)), data_torch[..., :n_ff, :].contiguous()),
+                            (fmt(T.FFN_UP_EXPS_TIER, int(key)), data_torch[..., n_ff:, :].contiguous())]
+                if proj == "down_proj":
+                    return [(fmt(T.FFN_DOWN_EXPS_TIER, int(key)), data_torch)]
+            elif ".mlp.expert_tier_ids." in name:
+                return [(fmt(T.FFN_EXP_TIER_IDS, int(name.rsplit(".", 1)[1])), data_torch.float())]
+            elif ".mlp.expert_tier_mask." in name:
+                return [(fmt(T.FFN_EXP_TIER_MASK, int(name.rsplit(".", 1)[1])), data_torch.float())]
+            raise ValueError(f"Unexpected expert tier tensor {name}")
+
         return super().modify_tensors(data_torch, name, bid)
 
     # the shards concatenate into a tensor of well over 100 GB

@@ -2342,6 +2342,11 @@ struct llama_model_qwen4exp : public llama_model_base {
                     ggml_tensor * cur,
                             int   il);
 
+        // niwaki: routed experts in precision tiers under the full router
+        ggml_tensor * build_tiered_moe(
+                    ggml_tensor * cur,
+                            int   il);
+
         ggml_tensor * build_norm_gated(
                     ggml_tensor * input,
                     ggml_tensor * weights,

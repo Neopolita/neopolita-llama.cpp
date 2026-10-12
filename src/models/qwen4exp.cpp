@@ -265,25 +265,63 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
         // takes the intact top-k over every expert and lets the missing ones contribute nothing
         // the bank's expert WIDTH is the file's too: a pruned model may narrow most layers' experts and keep
         // a few layers' (compact) banks at the original width, so expert_feed_forward_length is only the default
-        int64_t n_expert_l = n_expert;
-        int64_t n_ff_exp_l = n_ff_exp;
-        const std::string down_name = tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il).str();
-        if (const auto * down_w = ml.get_weight(down_name.c_str())) {
-            n_ff_exp_l = down_w->tensor->ne[0];
-            n_expert_l = down_w->tensor->ne[2];
-            if (n_expert_l < 1 || n_expert_l > n_expert) {
-                throw std::runtime_error(format("%s stores %" PRId64 " experts, expected 1..%" PRId64,
-                                                down_name.c_str(), n_expert_l, (int64_t) n_expert));
+        // niwaki: a layer may instead store its routed experts in precision tiers (as qwen35moe):
+        // blk.N.ffn_{gate,up,down}_exps.K (K = the tier's key) under the full router, each tier in its own
+        // quantization type and width — the tier's down tensor decides its expert count and width — with
+        // blk.N.ffn_exp_tier_ids.K / ffn_exp_tier_mask.K over every expert (see build_tiered_moe)
+        int     tier_key[llama_layer::LLAMA_MAX_EXP_TIERS];
+        int64_t tier_n  [llama_layer::LLAMA_MAX_EXP_TIERS];
+        int64_t tier_ff [llama_layer::LLAMA_MAX_EXP_TIERS];
+        for (int key = 0; key < 16; ++key) {
+            const std::string name = tn(LLM_TENSOR_FFN_DOWN_EXPS_TIER, "weight", il, key).str();
+            if (const auto * w = ml.get_weight(name.c_str())) {
+                if (layer.n_exp_tier == llama_layer::LLAMA_MAX_EXP_TIERS) {
+                    throw std::runtime_error(format("layer %d stores more than %d expert tiers", il, llama_layer::LLAMA_MAX_EXP_TIERS));
+                }
+                if (w->tensor->ne[2] < 1 || w->tensor->ne[2] > n_expert) {
+                    throw std::runtime_error(format("%s stores %" PRId64 " experts, expected 1..%" PRId64,
+                                                    name.c_str(), w->tensor->ne[2], (int64_t) n_expert));
+                }
+                tier_key[layer.n_exp_tier] = key;
+                tier_n  [layer.n_exp_tier] = w->tensor->ne[2];
+                tier_ff [layer.n_exp_tier] = w->tensor->ne[0];
+                layer.n_exp_tier++;
             }
         }
-        layer.n_expert_l    = n_expert_l;
-        layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, TENSOR_NOT_REQUIRED);
-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp_l, n_embd, n_expert_l }, TENSOR_NOT_REQUIRED);
-        if (layer.ffn_down_exps != nullptr) {
-            GGML_ASSERT(layer.ffn_gate_inp != nullptr && "routed experts without a router");
-            create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp_l, n_expert_l, 0);
-            if (n_expert_l < n_expert) {
-                layer.ffn_exp_ids = create_tensor(tn(LLM_TENSOR_FFN_EXP_IDS, "weight", il), { n_expert_l }, 0);
+        if (layer.n_exp_tier > 0) {
+            layer.n_expert_l   = n_expert;
+            layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", il), { n_embd, n_expert }, 0);
+            for (int t = 0; t < layer.n_exp_tier; ++t) {
+                const int     key  = tier_key[t];
+                const int64_t n_t  = tier_n[t];
+                const int64_t n_ff = tier_ff[t];
+                layer.ffn_gate_exps_tier[t] = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS_TIER, "weight", il, key), { n_embd, n_ff, n_t }, 0);
+                layer.ffn_up_exps_tier[t]   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS_TIER,   "weight", il, key), { n_embd, n_ff, n_t }, 0);
+                layer.ffn_down_exps_tier[t] = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_TIER, "weight", il, key), { n_ff, n_embd, n_t }, 0);
+                layer.ffn_exp_tier_ids[t]   = create_tensor(tn(LLM_TENSOR_FFN_EXP_TIER_IDS,   "weight", il, key), { n_expert }, 0);
+                layer.ffn_exp_tier_mask[t]  = create_tensor(tn(LLM_TENSOR_FFN_EXP_TIER_MASK,  "weight", il, key), { n_expert }, 0);
+            }
+        } else {
+            int64_t n_expert_l = n_expert;
+            int64_t n_ff_exp_l = n_ff_exp;
+            const std::string down_name = tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il).str();
+            if (const auto * down_w = ml.get_weight(down_name.c_str())) {
+                n_ff_exp_l = down_w->tensor->ne[0];
+                n_expert_l = down_w->tensor->ne[2];
+                if (n_expert_l < 1 || n_expert_l > n_expert) {
+                    throw std::runtime_error(format("%s stores %" PRId64 " experts, expected 1..%" PRId64,
+                                                    down_name.c_str(), n_expert_l, (int64_t) n_expert));
+                }
+            }
+            layer.n_expert_l    = n_expert_l;
+            layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, TENSOR_NOT_REQUIRED);
+            layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp_l, n_embd, n_expert_l }, TENSOR_NOT_REQUIRED);
+            if (layer.ffn_down_exps != nullptr) {
+                GGML_ASSERT(layer.ffn_gate_inp != nullptr && "routed experts without a router");
+                create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp_l, n_expert_l, 0);
+                if (n_expert_l < n_expert) {
+                    layer.ffn_exp_ids = create_tensor(tn(LLM_TENSOR_FFN_EXP_IDS, "weight", il), { n_expert_l }, 0);
+                }
             }
         }
 
@@ -1010,10 +1048,86 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
     return cur;
 }
 
+// niwaki: routed experts stored in precision tiers under the full router (see load_arch_tensors), as
+// qwen35moe's build_tiered_moe. The routing is the intact block's — softmax over every expert, top-k,
+// weights renormalised over the top-k and scaled — then each tier runs the selected slots through its own
+// tensors: a slot whose expert the tier does not store points at the tier's first expert with weight 0, so
+// every selected expert counts once, through its own tier, and an expert that no tier stores contributes
+// nothing (the compact bank's masked routing, with several banks).
+ggml_tensor * llama_model_qwen4exp::graph::build_tiered_moe(ggml_tensor * cur, const int il) {
+    const auto &  layer    = model.layers[il];
+    const int64_t n_tokens = cur->ne[1];
+
+    ggml_tensor * logits = build_lora_mm(layer.ffn_gate_inp, cur);                                  // [n_expert, n_tokens]
+    cb(logits, "ffn_moe_logits", il);
+    ggml_tensor * probs = ggml_soft_max(ctx0, logits);                                              // [n_expert, n_tokens]
+    cb(probs, "ffn_moe_probs", il);
+    ggml_tensor * sel = ggml_argsort_top_k(ctx0, probs, n_expert_used);                             // [n_expert_used, n_tokens]
+    cb(sel, "ffn_moe_topk", il);
+
+    ggml_tensor * w = ggml_get_rows(ctx0, ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens), sel); // [1, n_expert_used, n_tokens]
+    w = ggml_reshape_2d(ctx0, w, n_expert_used, n_tokens);
+    ggml_tensor * w_sum = ggml_clamp(ctx0, ggml_sum_rows(ctx0, w), 6.103515625e-5, INFINITY);        // [1, n_tokens]
+    w = ggml_div(ctx0, w, w_sum);                                                                   // [n_expert_used, n_tokens]
+    if (hparams.expert_weights_scale != 0.0f && hparams.expert_weights_scale != 1.0f) {
+        w = ggml_scale(ctx0, w, hparams.expert_weights_scale);
+    }
+    cb(w, "ffn_moe_weights_norm", il);
+
+    // mul_mat_id expects an expert at most once per row of ids (the Metal kernels map each expert's
+    // rows under that assumption), and a tier's out-of-tier slots share one expert: every (token, slot)
+    // pair becomes its own row with a single slot, its input the token's
+    const int64_t n_rows   = n_expert_used * n_tokens;
+    ggml_tensor * sel_flat = ggml_reshape_1d(ctx0, ggml_cont(ctx0, sel), n_rows);
+    ggml_tensor * x        = ggml_repeat_4d(ctx0, ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens), n_embd, n_expert_used, n_tokens, 1);
+    x = ggml_reshape_3d(ctx0, x, n_embd, 1, n_rows);                                                // [n_embd, 1, n_rows]
+
+    ggml_tensor * experts_all = nullptr;  // [n_embd, n_expert_used, n_tokens], summed over the tiers
+    for (int t = 0; t < layer.n_exp_tier; ++t) {
+        ggml_tensor * ids  = ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, layer.ffn_exp_tier_ids[t],  1, n_expert), sel_flat);
+        ggml_tensor * mask = ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, layer.ffn_exp_tier_mask[t], 1, n_expert), sel_flat);
+        ids = ggml_cast(ctx0, ids, GGML_TYPE_I32);                                                  // [1, n_rows]
+        ggml_tensor * w_t = ggml_mul(ctx0, w, ggml_reshape_2d(ctx0, mask, n_expert_used, n_tokens)); // [n_expert_used, n_tokens]
+        cb(w_t, "ffn_moe_weights_tier", il);
+
+        ggml_tensor * up   = build_lora_mm_id(layer.ffn_up_exps_tier[t],   x, ids);                  // [n_ff, 1, n_rows]
+        ggml_tensor * gate = build_lora_mm_id(layer.ffn_gate_exps_tier[t], x, ids);
+        ggml_tensor * act  = ggml_swiglu_split(ctx0, gate, up);
+        cb(act, "ffn_moe_swiglu", il);
+        ggml_tensor * experts = build_lora_mm_id(layer.ffn_down_exps_tier[t], act, ids);            // [n_embd, 1, n_rows]
+        experts = ggml_reshape_3d(ctx0, experts, n_embd, n_expert_used, n_tokens);
+        experts = ggml_mul(ctx0, experts, ggml_reshape_3d(ctx0, w_t, 1, n_expert_used, n_tokens));
+        experts_all = experts_all ? ggml_add(ctx0, experts_all, experts) : experts;
+    }
+    cb(experts_all, "ffn_moe_weighted", il);
+    ggml_build_forward_expand(gf, experts_all);
+
+    // as build_moe_ffn: views ordered before the adds, bounded by the layer's own top-k (warmup selects
+    // every expert)
+    const uint32_t n_used_il = hparams.n_expert_used(il);
+    ggml_tensor * views[LLAMA_MAX_EXPERTS] = { nullptr };
+    for (uint32_t i = 0; i < n_used_il; ++i) {
+        views[i] = ggml_view_2d(ctx0, experts_all, n_embd, n_tokens, experts_all->nb[2], i*experts_all->nb[1]);
+        ggml_build_forward_expand(gf, views[i]);
+    }
+    ggml_tensor * moe_out = views[0];
+    for (uint32_t i = 1; i < n_used_il; ++i) {
+        moe_out = ggml_add(ctx0, moe_out, views[i]);
+        ggml_build_forward_expand(gf, moe_out);
+    }
+    if (n_used_il == 1) {
+        moe_out = ggml_cont(ctx0, moe_out);  // avoid returning a non-contiguous tensor
+    }
+    return moe_out;
+}
+
 ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, const int il) {
     // niwaki: a layer without its routed bank contributes only its shared expert
     ggml_tensor * moe_out = nullptr;
-    if (model.layers[il].ffn_gate_inp != nullptr && model.layers[il].ffn_down_exps != nullptr &&
+    if (model.layers[il].n_exp_tier > 0) {
+        moe_out = build_tiered_moe(cur, il);
+        cb(moe_out, "ffn_moe_out", il);
+    } else if (model.layers[il].ffn_gate_inp != nullptr && model.layers[il].ffn_down_exps != nullptr &&
             model.layers[il].ffn_exp_ids != nullptr) {
         // niwaki: compact bank under the full router. The routing is the intact block's — softmax over
         // every expert, top-k, weights renormalised over the top-k — and only the stored experts run:
